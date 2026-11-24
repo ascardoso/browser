@@ -13,7 +13,7 @@ No build step, no dependencies. Open `wavetable-flute.html` in a modern browser.
 ## Playing
 
 | Control | What it does |
-|---|---|
+| --- | --- |
 | **A S D F G H J K** | White keys, one octave from C |
 | **W E T Y U** | Black keys |
 | **Z / X** | Octave down / up (range of -2 to +2) |
@@ -30,6 +30,18 @@ The synth is polyphonic, so you can hold several keys at once.
 - **Scan position:** the frame being played, 0 to 100%. Moves on its own in Sweep mode and is draggable in Hold mode.
 - **Release:** how long notes take to fade after you let go (0.05 to 2 s).
 - **Waveforms / Harmonics:** switches the 3D stack between the raw waveforms and a harmonic-amplitude waterfall for each frame.
+
+## Importing a recording
+
+Click **Load audio…** (or drop a file on the 3D stack) to replace the built-in table with your own sound.
+
+- **Formats:** WAV is the safe choice. MP3, OGG and M4A/AAC work wherever the browser can decode them.
+- **Best source:** one sustained, monophonic note with a fairly steady pitch, 1 to 8 seconds long. Chords, heavy reverb and big pitch glides will smear.
+- **What happens:** the file is mixed to mono, trimmed to the audible part, its pitch is detected, and 32 single cycles are cut along the note. Each is resampled to 512 samples and phase-aligned to its neighbour. The slice stops where the sound falls to about 6% of its peak, and the sweep time is set to that length.
+- **Attack detail:** spaces the 32 frames unevenly, packing more of them into the start of the note where a pluck or chiff changes fastest. The sweep is timed to match, so the note still plays at its real speed. It is set automatically (0% for steady notes, 50% for decaying ones) and re-slices the recording when you move it. Re-slicing discards manual frame edits.
+- **Level each frame:** on, every frame is normalised for an even sound. Off, the original loudness shape of the recording is kept.
+- **Pitch:** the A key plays the recording at its original pitch (the detected note, with its small tuning offset applied), and the other keys follow chromatically. Z / X shift octaves. The detected pitch is shown next to the button. If it is an octave out, the detection picked the wrong period.
+- **Reset table** brings back the built-in flute.
 
 ## Reading the 3D stack
 
@@ -59,7 +71,7 @@ Edits live in memory only. Reloading the page resets everything.
 
 ## Known limitations
 
-- **The table is synthetic.** It is a flute-like stand-in, not a slice of a real recording.
+- **The built-in table is synthetic.** Import a recording to use real material. Slicing is automatic and works best on clean, steady notes.
 - **No band-limiting.** High notes can alias because the table is read with plain linear interpolation and no per-octave versions.
 - **`ScriptProcessorNode` is deprecated.** It was chosen because it works where blob-based AudioWorklets can be blocked. It runs on the main thread, so heavy page activity can cause glitches.
 - **No persistence.** Edited tables are not saved or exportable yet.
@@ -67,7 +79,6 @@ Edits live in memory only. Reloading the page resets everything.
 
 ## Ideas for next steps
 
-- Import a recording, detect its pitch and auto-slice it into aligned cycles
 - Sustain loop between two chosen frames
 - Band-limited mipmapped tables, or a move to an AudioWorklet
 - Scan modulation (LFO, velocity, mod wheel) and a filter
