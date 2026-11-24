@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Channel vocoder</title>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#eceae6;--panel:#f7f6f3;--ink:#201e1b;--dim:#6f6a62;--acc:#e0531a;--sel:#2b6f9e;--rule:#cfcac1;color-scheme:light;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#141311;--panel:#1d1b18;--ink:#efece6;--dim:#a29c91;--acc:#ff7a3d;--sel:#5eb4ea;--rule:#3a362f;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#141311;--panel:#1d1b18;--ink:#efece6;--dim:#a29c91;--acc:#ff7a3d;--sel:#5eb4ea;--rule:#3a362f;color-scheme:dark}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:Archivo,system-ui,sans-serif}
+main{max-width:980px;margin:0 auto;padding:20px 16px 40px}
+h1{font-size:2rem;font-weight:800;margin:0 0 4px;letter-spacing:-.02em}
+p.sub{margin:0 0 14px;color:var(--dim);max-width:64ch;line-height:1.45}
+canvas{display:block;width:100%;height:clamp(200px,38vw,320px);background:var(--panel);border:1px solid var(--rule);border-radius:6px}
+.row{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:end;margin-top:14px}
+label{display:flex;flex-direction:column;gap:4px;font-size:.85rem;color:var(--dim);min-width:140px}
+label b{color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--acc)}
+select,button{font:inherit;font-size:.85rem;color:var(--ink);background:var(--panel);border:1px solid var(--rule);border-radius:6px;padding:7px 12px;cursor:pointer}
+button[aria-pressed=true],.keys button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--sel);outline-offset:2px}
+#msg{font-size:.85rem;color:var(--dim);margin-top:10px;min-height:1.2em}
+h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);margin:20px 0 0;font-weight:600}
+.keys{display:grid;grid-template-columns:repeat(13,1fr);gap:4px;margin-top:10px}
+.keys button{height:60px;padding:0;color:var(--dim);touch-action:none}
+.keys button.blk{background:var(--ink);color:var(--bg)}
+@media (max-width:560px){.keys button{height:50px;font-size:.75rem}}
+</style></head>
+<body><main>
+<h1>Channel vocoder</h1>
+<p class="sub">Your voice is split into frequency bands. How loud each band is, moment to moment, shapes the same bands of a synth, so the synth appears to talk. Use headphones with the mic to avoid feedback.</p>
+
+<canvas id="cv" aria-label="Live band levels"></canvas>
+<div id="msg">Choose a voice source, then play keys A to K or switch on the drone.</div>
+
+<h2>Voice (modulator)</h2>
+<div class="row">
+ <button id="mic" aria-pressed="false">Use microphone</button>
+ <button id="ld">Load voice file…</button><input id="file" type="file" accept="audio/*" hidden>
+ <label>Input gain <b id="gV">2.0</b><input id="g" type="range" min="0.2" max="8" step="0.1" value="2"></label>
+ <label>Bands <select id="n"><option>8</option><option selected>16</option><option>24</option></select></label>
+ <label>Smoothing <b id="smV">30 Hz</b><input id="sm" type="range" min="8" max="90" step="1" value="30"></label>
+</div>
+
+<h2>Synth (carrier)</h2>
+<div class="row">
+ <label>Wave <select id="wave"><option value="sawtooth">Saw</option><option value="square">Square</option></select></label>
+ <button id="drone" aria-pressed="false">Drone chord</button>
+ <label>Formant shift <b id="fsV">0 st</b><input id="fs" type="range" min="-12" max="12" step="0.5" value="0"></label>
+ <label>Noise in carrier <b id="nzV">8%</b><input id="nz" type="range" min="0" max="1" step="0.01" value="0.08"></label>
+ <label>Consonants <b id="coV">100%</b><input id="co" type="range" min="0" max="2" step="0.05" value="1"></label>
+ <label>Output <b id="oV">2.0</b><input id="o" type="range" min="0.2" max="5" step="0.1" value="2"></label>
+</div>
+<div class="keys" id="keys"></div>
+<div id="oct" style="font-size:.85rem;color:var(--dim);margin-top:8px">Z / X shift octave · octave 0</div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+let ctx,modIn,carBus,out,nG,bands=[],voices={},src=null,oct=0;
+const P={g:2,sm:30,fs:0};
+const msg=t=>{$('msg').textContent=t};
+const bq=(t,f,q)=>{const x=ctx.createBiquadFilter();x.type=t;x.frequency.value=f;if(q)x.Q.value=q;return x};
+const rect=()=>{const s=ctx.createWaveShaper(),c=new Float32Array(1025);for(let i=0;i<1025;i++)c[i]=Math.abs(i/512-1);s.curve=c;return s};
+
+function init(){
+  if(ctx){ctx.resume();return}
+  ctx=new (window.AudioContext||window.webkitAudioContext)();
+  modIn=ctx.createGain();modIn.gain.value=P.g;
+  carBus=ctx.createGain();
+  const comp=ctx.createDynamicsCompressor();out=ctx.createGain();out.gain.value=+$('o').value;out.connect(comp);comp.connect(ctx.destination);
+  const nb=ctx.createBuffer(1,ctx.sampleRate*2,ctx.sampleRate),d=nb.getChannelData(0);
+  for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;
+  const nz=ctx.createBufferSource();nz.buffer=nb;nz.loop=true;nz.start();
+  nG=ctx.createGain();nG.gain.value=+$('nz').value;nz.connect(nG);nG.connect(carBus);
+  /* consonants: highpassed voice energy opens highpassed noise */
+  const hp=bq('highpass',5000),r=rect(),lp=bq('lowpass',40),k=ctx.createGain(),sv=ctx.createGain(),nh=bq('highpass',5000);
+  window.co=ctx.createGain();co.gain.value=+$('co').value;k.gain.value=14;sv.gain.value=0;
+  modIn.connect(hp);hp.connect(r);r.connect(lp);lp.connect(k);k.connect(sv.gain);
+  nz.connect(nh);nh.connect(sv);sv.connect(co);co.connect(out);
+  build(+$('n').value);
+}
+function build(n){
+  bands.forEach(b=>{modIn.disconnect(b.m);carBus.disconnect(b.c);b.nodes.forEach(x=>x.disconnect())});bands=[];
+  const lo=120,hi=7500,bw=Math.log2(hi/lo)/(n-1),q=Math.sqrt(2**bw)/(2**bw-1);
+  for(let i=0;i<n;i++){
+    const fc=lo*Math.pow(hi/lo,i/(n-1)),m=bq('bandpass',fc,q),r=rect(),f=bq('lowpass',P.sm),k=ctx.createGain(),
+      c=bq('bandpass',fc*2**(P.fs/12),q),v=ctx.createGain(),a=ctx.createAnalyser();
+    k.gain.value=10;v.gain.value=0;a.fftSize=32;
+    modIn.connect(m);m.connect(r);r.connect(f);f.connect(k);k.connect(v.gain);k.connect(a);
+    carBus.connect(c);c.connect(v);v.connect(out);
+    bands.push({fc,m,f,c,a,nodes:[m,r,f,k,c,v,a]});
+  }
+}
+
+/* synth voices */
+function on(id,m){init();if(voices[id])return;
+  const g=ctx.createGain();g.gain.value=0;g.connect(carBus);
+  const fr=440*2**((m-69)/12),os=[-6,6].map(dt=>{const o=ctx.createOscillator();o.type=$('wave').value;o.frequency.value=fr;o.detune.value=dt;o.connect(g);o.start();return o});
+  g.gain.setTargetAtTime(0.12,ctx.currentTime,0.01);voices[id]={g,os};mark(id,true)}
+function off(id){const v=voices[id];if(!v)return;delete voices[id];
+  v.g.gain.setTargetAtTime(0,ctx.currentTime,0.05);setTimeout(()=>{v.os.forEach(o=>o.stop());v.g.disconnect()},500);mark(id,false)}
+const KEYS='awsedftgyhujk',btns=[],base=()=>48+oct*12;
+KEYS.split('').forEach((c,i)=>{const b=document.createElement('button');b.textContent=c.toUpperCase();
+  if([1,3,6,8,10].includes(i))b.classList.add('blk');
+  b.addEventListener('pointerdown',e=>{e.preventDefault();b.setPointerCapture(e.pointerId);on('k'+i,base()+i)});
+  const up=()=>off('k'+i);b.addEventListener('pointerup',up);b.addEventListener('pointercancel',up);
+  $('keys').appendChild(b);btns.push(b)});
+function mark(id,x){if(id[0]==='k')btns[+id.slice(1)].classList.toggle('on',x)}
+addEventListener('keydown',e=>{if(e.repeat||e.ctrlKey||e.metaKey||e.altKey)return;const k=e.key.toLowerCase(),i=KEYS.indexOf(k);
+  if(i>=0){on('k'+i,base()+i);return}
+  if(k==='z'||k==='x'){oct=Math.max(-2,Math.min(2,oct+(k==='x'?1:-1)));$('oct').textContent='Z / X shift octave · octave '+oct}});
+addEventListener('keyup',e=>{const i=KEYS.indexOf(e.key.toLowerCase());if(i>=0)off('k'+i)});
+$('drone').onclick=e=>{const a=e.target.getAttribute('aria-pressed')!=='true';e.target.setAttribute('aria-pressed',a);
+  [48,55,63].forEach((m,i)=>a?on('d'+i,m):off('d'+i))};
+
+/* voice sources */
+function stopSrc(){if(!src)return;try{src.n.stop&&src.n.stop()}catch(e){}src.n.disconnect();src.s&&src.s.getTracks().forEach(t=>t.stop());src=null;$('mic').setAttribute('aria-pressed',false)}
+$('mic').onclick=async()=>{init();if(src&&src.s){stopSrc();msg('Microphone off.');return}
+  try{const s=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:false,autoGainControl:false}});
+    stopSrc();const n=ctx.createMediaStreamSource(s);n.connect(modIn);src={n,s};$('mic').setAttribute('aria-pressed',true);msg('Microphone on. Speak while holding keys or with the drone running.')}
+  catch(e){msg('Couldn’t open the microphone here ('+e.name+'). Try “Load voice file” instead.')}};
+$('ld').onclick=()=>$('file').click();
+$('file').onchange=async e=>{const f=e.target.files[0];e.target.value='';if(!f)return;init();
+  try{const ab=await ctx.decodeAudioData(await f.arrayBuffer());stopSrc();const n=ctx.createBufferSource();n.buffer=ab;n.loop=true;n.connect(modIn);n.start();src={n};msg('Looping '+f.name+'. The original is not played, only the vocoded result.')}
+  catch(err){msg('Couldn’t read that file.')}};
+
+/* controls */
+const bind=(id,fn,fmt)=>$(id).oninput=e=>{const v=+e.target.value;$(id+'V').textContent=fmt(v);if(ctx)fn(v)};
+bind('g',v=>{P.g=v;modIn.gain.value=v},v=>v.toFixed(1));
+bind('o',v=>out.gain.value=v,v=>v.toFixed(1));
+bind('sm',v=>{P.sm=v;bands.forEach(b=>b.f.frequency.value=v)},v=>v+' Hz');
+bind('fs',v=>{P.fs=v;bands.forEach(b=>b.c.frequency.value=b.fc*2**(v/12))},v=>v+' st');
+bind('nz',v=>nG.gain.value=v,v=>Math.round(v*100)+'%');
+bind('co',v=>co.gain.value=v,v=>Math.round(v*100)+'%');
+$('n').onchange=e=>{if(ctx)build(+e.target.value)};
+$('wave').onchange=e=>Object.values(voices).forEach(v=>v.os.forEach(o=>o.type=e.target.value));
+
+/* display */
+const buf=new Float32Array(32);let DPR=1;
+function fit(){const c=$('cv'),r=c.getBoundingClientRect();DPR=devicePixelRatio||1;c.width=Math.round(r.width*DPR);c.height=Math.round(r.height*DPR)}
+addEventListener('resize',fit);fit();
+const col=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function draw(){
+  const c=$('cv'),g=c.getContext('2d'),W=c.width/DPR,H=c.height/DPR,n=bands.length||+$('n').value;
+  g.setTransform(DPR,0,0,DPR,0,0);g.clearRect(0,0,W,H);
+  const gap=4,bw=(W-24-(n-1)*gap)/n,top=14,bot=H-26;
+  g.fillStyle=col('--rule');for(let i=0;i<n;i++)g.fillRect(12+i*(bw+gap),bot,bw,1);
+  for(let i=0;i<bands.length;i++){
+    bands[i].a.getFloatTimeDomainData(buf);let s=0;for(const v of buf)s+=v;s=Math.max(0,s/32);
+    const lv=Math.min(1,Math.sqrt(s)),h=lv*(bot-top),x=12+i*(bw+gap);
+    g.fillStyle=col('--acc');g.fillRect(x,bot-h,bw,h);
+  }
+  g.fillStyle=col('--dim');g.font='12px Archivo,system-ui,sans-serif';
+  g.fillText('120 Hz',12,H-8);g.textAlign='right';g.fillText('7.5 kHz',W-12,H-8);g.textAlign='left';
+  requestAnimationFrame(draw);
+}
+draw();
+</script></body></html>
