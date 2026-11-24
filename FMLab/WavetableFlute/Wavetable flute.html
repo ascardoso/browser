@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Wavetable flute</title>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#e8ebf2;--panel:#f6f7fa;--ink:#1b1d2e;--dim:#666b84;--line:#2a2d4a;--acc:#d6246e;--sel:#13788a;--rule:#c5c9d8;color-scheme:light;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#12112a;--panel:#1b1a3a;--ink:#e9e7fb;--dim:#9591c0;--line:#b9b4f0;--acc:#ff4f93;--sel:#4fd0e0;--rule:#34326b;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#12112a;--panel:#1b1a3a;--ink:#e9e7fb;--dim:#9591c0;--line:#b9b4f0;--acc:#ff4f93;--sel:#4fd0e0;--rule:#34326b;color-scheme:dark}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:Archivo,system-ui,sans-serif}
+main{max-width:980px;margin:0 auto;padding:20px 16px 40px}
+h1{font-size:2rem;font-weight:800;margin:0 0 4px;letter-spacing:-.02em}
+p.sub{margin:0 0 16px;color:var(--dim);max-width:62ch;line-height:1.45}
+.bar{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 6px;font-size:.9rem;color:var(--dim)}
+canvas{display:block;width:100%;background:var(--panel);border:1px solid var(--rule);border-radius:6px;touch-action:none}
+#wf{height:clamp(300px,54vw,500px);cursor:pointer}
+#ed{height:150px;cursor:crosshair}
+section{margin-top:18px}
+.row{display:flex;flex-wrap:wrap;gap:14px 22px;align-items:end;margin-top:14px}
+label{display:flex;flex-direction:column;gap:4px;font-size:.85rem;color:var(--dim);min-width:150px}
+label b{color:var(--ink);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--acc)}
+.seg{display:inline-flex;border:1px solid var(--rule);border-radius:6px;overflow:hidden}
+button{font:inherit;font-size:.85rem;color:var(--ink);background:var(--panel);border:0;padding:7px 12px;cursor:pointer}
+.seg button+button{border-left:1px solid var(--rule)}
+button[aria-pressed=true]{background:var(--acc);color:#fff}
+button.solo{border:1px solid var(--rule);border-radius:6px}
+button:focus-visible,input:focus-visible{outline:2px solid var(--sel);outline-offset:2px}
+.keys{display:grid;grid-template-columns:repeat(13,1fr);gap:4px;margin-top:10px}
+.keys button{height:64px;border:1px solid var(--rule);border-radius:4px;color:var(--dim);touch-action:none;padding:0}
+.keys button.on{background:var(--sel);color:#fff}
+.keys button.blk{background:var(--line);color:var(--bg)}
+@media (max-width:560px){.keys button{height:52px;font-size:.75rem}}
+</style></head>
+<body><main>
+<h1>Wavetable flute</h1>
+<p class="sub">A flute note stored as 32 single-cycle waves and stepped through as it plays. Hold a key (A to K) to hear it unfold, click the stack to pick a frame, and draw on the strip to reshape it.</p>
+
+<div class="bar"><span id="stat">Press a key to start audio</span>
+<span class="seg" role="group" aria-label="View"><button id="vW" aria-pressed="true">Waveforms</button><button id="vS" aria-pressed="false">Harmonics</button></span></div>
+<canvas id="wf" aria-label="3D stack of wavetable frames"></canvas>
+
+<div class="row">
+ <span class="seg" role="group" aria-label="Scan mode"><button id="mSw" aria-pressed="true">Sweep</button><button id="mHo" aria-pressed="false">Hold</button></span>
+ <label>Sweep time <b id="swV">2.5 s</b><input id="sw" type="range" min="0.3" max="8" step="0.1" value="2.5"></label>
+ <label>Scan position <b id="scV">0%</b><input id="sc" type="range" min="0" max="1" step="0.001" value="0" disabled></label>
+ <label>Release <b id="rlV">0.4 s</b><input id="rl" type="range" min="0.05" max="2" step="0.05" value="0.4"></label>
+</div>
+
+<section>
+ <div class="bar"><span id="edT">Editing frame 1 of 32</span>
+ <span><button class="solo" id="smooth">Smooth frame</button> <button class="solo" id="reset">Reset table</button></span></div>
+ <canvas id="ed" aria-label="Draw the selected waveform"></canvas>
+</section>
+
+<section>
+ <div class="bar"><span>Keys A S D F G H J K and the row above · Z / X shift octave</span><span id="oct">Octave 0</span></div>
+ <div class="keys" id="keys"></div>
+</section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const N=32,L=512,HM=32,TAU=Math.PI*2;
+let T=[],SP=[],dirty=[],sel=0,view='wave',mode='sweep',oct=0,voices=[],ctx=null,node=null;
+const cosT=new Float32Array(L),sinT=new Float32Array(L);
+for(let i=0;i<L;i++){cosT[i]=Math.cos(TAU*i/L);sinT[i]=Math.sin(TAU*i/L)}
+
+function gen(){
+  T=[];dirty=[];let seed=7;const rnd=()=>(seed=seed*16807%2147483647)/2147483647;
+  const jit=[];for(let k=0;k<=40;k++)jit.push([rnd()*TAU,rnd()]);
+  for(let i=0;i<N;i++){
+    const t=i/(N-1),f=new Float32Array(L);
+    for(let k=1;k<=40;k++){
+      let a=Math.pow(k,-1.5);
+      if(k===2)a*=1.5;
+      if(k>2)a+=Math.exp(-t*9)*(0.5+jit[k][1])*Math.pow(k,-0.8)*0.9;   // breathy attack
+      if(k>3)a*=1+0.2*Math.sin(t*18+k);                                  // slow shimmer
+      const ph=jit[k][0]*Math.exp(-t*7);                                 // attack phases settle
+      for(let n=0;n<L;n++)f[n]+=a*Math.sin(TAU*k*n/L+ph);
+    }
+    let mx=0;for(let n=0;n<L;n++)mx=Math.max(mx,Math.abs(f[n]));
+    for(let n=0;n<L;n++)f[n]*=0.9/mx;
+    T.push(f);dirty.push(true);
+  }
+}
+function spec(i){
+  if(dirty[i]){const a=new Float32Array(HM),f=T[i];
+    for(let k=1;k<=HM;k++){let re=0,im=0;for(let n=0;n<L;n++){const j=(k*n)%L;re+=f[n]*cosT[j];im+=f[n]*sinT[j]}a[k-1]=Math.hypot(re,im)*2/L}
+    SP[i]=a;dirty[i]=false}
+  return SP[i];
+}
+
+/* audio */
+function startAudio(){
+  if(ctx){ctx.resume();return}
+  ctx=new (window.AudioContext||window.webkitAudioContext)();
+  node=ctx.createScriptProcessor(512,0,1);
+  node.onaudioprocess=e=>{
+    const o=e.outputBuffer.getChannelData(0),sr=ctx.sampleRate;o.fill(0);
+    const sw=+$('sw').value,hold=mode==='hold',hs=+$('sc').value,rc=Math.exp(-6.9/(+$('rl').value*sr));
+    for(const v of voices){const inc=v.f/sr;
+      for(let s=0;s<o.length;s++){
+        const sc=hold?hs:Math.min(1,v.t/sw);v.t+=1/sr;
+        const p=sc*(N-1),i0=p|0,i1=Math.min(N-1,i0+1),fr=p-i0;
+        const idx=v.ph*L,j0=idx|0,j1=(j0+1)&(L-1),w=idx-j0,A=T[i0],B=T[i1];
+        const a=A[j0]+(A[j1]-A[j0])*w,b=B[j0]+(B[j1]-B[j0])*w;
+        v.ph+=inc;if(v.ph>=1)v.ph-=1;
+        if(v.gate){if(v.env<1)v.env=Math.min(1,v.env+1/(0.006*sr))}else v.env*=rc;
+        o[s]+=(a+(b-a)*fr)*v.env*0.22;v.scan=sc;
+      }}
+    voices=voices.filter(v=>v.gate||v.env>1e-4);
+    for(let s=0;s<o.length;s++)o[s]=Math.tanh(o[s]);
+  };
+  node.connect(ctx.destination);
+}
+function on(m){startAudio();if(voices.some(v=>v.m===m&&v.gate))return;
+  voices.push({m,f:440*Math.pow(2,(m-69)/12),ph:0,t:0,env:0,gate:true,scan:0});mark(m,true)}
+function off(m){for(const v of voices)if(v.m===m)v.gate=false;mark(m,false)}
+
+/* keyboard */
+const KEYS='awsedftgyhujk',BLK=[1,3,6,8,10,11];
+const kb=$('keys'),btns=[];
+KEYS.split('').forEach((c,i)=>{const b=document.createElement('button');b.textContent=c.toUpperCase();
+  if([1,3,6,8,10].includes(i))b.classList.add('blk');
+  b.addEventListener('pointerdown',e=>{e.preventDefault();b.setPointerCapture(e.pointerId);on(60+oct*12+i)});
+  const up=()=>off(60+oct*12+i);b.addEventListener('pointerup',up);b.addEventListener('pointercancel',up);
+  kb.appendChild(b);btns.push(b)});
+function mark(m,x){const i=m-60-oct*12;if(btns[i])btns[i].classList.toggle('on',x)}
+addEventListener('keydown',e=>{if(e.repeat||e.ctrlKey||e.metaKey||e.altKey)return;const k=e.key.toLowerCase();
+  const i=KEYS.indexOf(k);if(i>=0){on(60+oct*12+i);return}
+  if(k==='z'||k==='x'){oct=Math.max(-2,Math.min(2,oct+(k==='x'?1:-1)));$('oct').textContent='Octave '+oct}});
+addEventListener('keyup',e=>{const i=KEYS.indexOf(e.key.toLowerCase());if(i>=0)off(60+oct*12+i)});
+
+/* controls */
+function seg(a,b,fn){[a,b].forEach(x=>x.onclick=()=>{a.setAttribute('aria-pressed',x===a);b.setAttribute('aria-pressed',x===b);fn(x===a)})}
+seg($('mSw'),$('mHo'),s=>{mode=s?'sweep':'hold';$('sc').disabled=s});
+seg($('vW'),$('vS'),w=>{view=w?'wave':'spec'});
+$('sw').oninput=e=>$('swV').textContent=(+e.target.value).toFixed(1)+' s';
+$('rl').oninput=e=>$('rlV').textContent=(+e.target.value).toFixed(2)+' s';
+$('smooth').onclick=()=>{const f=T[sel],c=Float32Array.from(f);for(let n=0;n<L;n++)f[n]=(c[(n+L-1)%L]+c[n]*2+c[(n+1)%L])/4;dirty[sel]=true};
+$('reset').onclick=()=>{gen();sel=0};
+function curScan(){const v=voices[voices.length-1];return v?v.scan:(mode==='hold'?+$('sc').value:0)}
+
+/* canvases */
+let DPR=1;
+function fit(c){const r=c.getBoundingClientRect();DPR=devicePixelRatio||1;c.width=Math.round(r.width*DPR);c.height=Math.round(r.height*DPR)}
+function fitAll(){fit($('wf'));fit($('ed'))}
+addEventListener('resize',fitAll);
+const col=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+function geom(W,H){const m=20,ah=H*0.16,pw=W*0.6;return{m,ah,pw,dx:(W-pw-2*m)/(N-1),dy:(H-ah-2*m)/(N-1)}}
+function drawWF(){
+  const c=$('wf'),g=c.getContext('2d'),W=c.width/DPR,H=c.height/DPR;
+  g.setTransform(DPR,0,0,DPR,0,0);g.clearRect(0,0,W,H);
+  const {m,ah,pw,dx,dy}=geom(W,H),bg=col('--panel'),ln=col('--line'),acc=col('--acc'),sl=col('--sel');
+  const s=curScan(),near=Math.round(s*(N-1));
+  let mx=1;if(view==='spec'){mx=1e-6;for(let i=0;i<N;i++){const a=spec(i);for(let k=0;k<HM;k++)mx=Math.max(mx,a[k])}}
+  g.lineJoin='round';
+  for(let i=N-1;i>=0;i--){
+    const x0=m+i*dx,y0=H-m-i*dy;g.beginPath();
+    if(view==='wave'){const f=T[i];for(let n=0;n<L;n+=2){const x=x0+n/L*pw,y=y0-f[n]*ah*0.5;n?g.lineTo(x,y):g.moveTo(x,y)}}
+    else{const a=spec(i);g.moveTo(x0,y0);for(let k=0;k<HM;k++)g.lineTo(x0+(k+1)/(HM+1)*pw,y0-a[k]/mx*ah);g.lineTo(x0+pw,y0)}
+    const ex=x0+pw;g.lineTo(ex,y0+3);g.lineTo(x0,y0+3);g.closePath();g.fillStyle=bg;g.fill();
+    const hi=i===near,sd=i===sel;
+    g.globalAlpha=hi||sd?1:0.45+0.5*(1-i/N);
+    g.strokeStyle=hi?acc:sd?sl:ln;g.lineWidth=hi?2.4:sd?2:1.1;g.stroke();
+  }
+  g.globalAlpha=1;g.fillStyle=col('--dim');g.font='12px Archivo,system-ui,sans-serif';
+  g.fillText('start of note',m,H-4);g.textAlign='right';g.fillText('end of note',W-m,m+10);g.textAlign='left';
+  $('stat').textContent=(ctx?'':'Press a key to start audio · ')+'Scan '+Math.round(s*100)+'% · frame '+(near+1)+' of '+N;
+  if(mode==='sweep')$('sc').value=s;$('scV').textContent=Math.round(s*100)+'%';
+}
+function drawEd(){
+  const c=$('ed'),g=c.getContext('2d'),W=c.width/DPR,H=c.height/DPR;
+  g.setTransform(DPR,0,0,DPR,0,0);g.clearRect(0,0,W,H);
+  g.strokeStyle=col('--rule');g.lineWidth=1;g.beginPath();g.moveTo(0,H/2);g.lineTo(W,H/2);g.stroke();
+  g.strokeStyle=col('--sel');g.lineWidth=2;g.beginPath();const f=T[sel];
+  for(let n=0;n<L;n++){const x=n/(L-1)*W,y=H/2-f[n]*H/2*0.95;n?g.lineTo(x,y):g.moveTo(x,y)}g.stroke();
+  $('edT').textContent='Editing frame '+(sel+1)+' of '+N;
+}
+(function loop(){drawWF();drawEd();requestAnimationFrame(loop)})();
+
+/* interaction: pick frame on the stack */
+function pick(e){const c=$('wf'),r=c.getBoundingClientRect(),W=r.width,H=r.height,{m,ah,dy}=geom(W,H);
+  const y=e.clientY-r.top;sel=Math.max(0,Math.min(N-1,Math.round((H-m-ah*0.3-y)/dy)));
+  if(mode==='hold'){$('sc').value=sel/(N-1)}}
+let dragWF=false;
+$('wf').addEventListener('pointerdown',e=>{dragWF=true;$('wf').setPointerCapture(e.pointerId);pick(e)});
+$('wf').addEventListener('pointermove',e=>{if(dragWF)pick(e)});
+$('wf').addEventListener('pointerup',()=>dragWF=false);
+
+/* interaction: draw on the selected frame */
+let last=null;
+function put(e){const r=$('ed').getBoundingClientRect();
+  const i=Math.max(0,Math.min(L-1,Math.round((e.clientX-r.left)/r.width*(L-1))));
+  const v=Math.max(-1,Math.min(1,(1-2*(e.clientY-r.top)/r.height)/0.95));
+  const f=T[sel];
+  if(last===null)f[i]=v;else{const a=Math.min(last.i,i),b=Math.max(last.i,i);
+    for(let n=a;n<=b;n++){const t=b===a?1:(n-last.i)/(i-last.i);f[n]=last.v+(v-last.v)*t}}
+  last={i,v};dirty[sel]=true}
+$('ed').addEventListener('pointerdown',e=>{$('ed').setPointerCapture(e.pointerId);last=null;put(e)});
+$('ed').addEventListener('pointermove',e=>{if(e.buttons)put(e)});
+$('ed').addEventListener('pointerup',()=>last=null);
+
+gen();fitAll();
+</script></body></html>
